@@ -23,7 +23,7 @@ A Rust client library for interacting with the [Lotus](https://github.com/fileco
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-lotus-client = "0.1.0"
+lotus-client = "0.1.1"
 ```
 
 ## Usage
