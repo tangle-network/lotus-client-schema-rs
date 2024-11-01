@@ -2,6 +2,8 @@
 name = "lotus-client-schema-rs"
 version = "0.1.0"
 edition = "2021"
+description = "Rust client library for interacting with Lotus JSON-RPC API"
+license = "MIT"
 
 exclude = ["go-schemagen/"]
 
