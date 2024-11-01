@@ -4,6 +4,7 @@
 
 use crate::client::LotusClient;
 use jsonrpc_core::Error;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
