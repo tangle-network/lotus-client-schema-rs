@@ -3,6 +3,8 @@ name = "lotus-client-schema-rs"
 version = "0.1.0"
 edition = "2021"
 
+exclude = ["go-schemagen/"]
+
 [dependencies]
 async-trait = "0.1.83"
 jsonrpc-core = "18.0.0"
