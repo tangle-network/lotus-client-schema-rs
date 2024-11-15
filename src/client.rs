@@ -5,7 +5,7 @@ use jsonrpsee::{
     http_client::{HeaderMap, HttpClient, HttpClientBuilder},
     rpc_params,
 };
-use jsonrpsee_core::client::SubscriptionClientT;
+use jsonrpsee_core::{client::SubscriptionClientT, params::ArrayParams};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -52,7 +52,11 @@ impl LotusClient {
         method: &str,
         params: Vec<Value>,
     ) -> Result<T, jsonrpc_core::Error> {
-        let params = rpc_params!(params);
+        let params = if params.is_empty() {
+            ArrayParams::new()
+        } else {
+            rpc_params!(params)
+        };
         self.client
             .request(method, params)
             .await
@@ -65,7 +69,11 @@ impl LotusClient {
         method: &str,
         params: Vec<Value>,
     ) -> Result<mpsc::Receiver<T>, jsonrpc_core::Error> {
-        let params = rpc_params!(params);
+        let params = if params.is_empty() {
+            ArrayParams::new()
+        } else {
+            rpc_params!(params)
+        };
         let (tx, rx) = mpsc::channel(100);
 
         let mut subscription = self
