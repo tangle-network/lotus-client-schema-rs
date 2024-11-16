@@ -4,7 +4,11 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -141,10 +145,11 @@ func getBaseParamName(t reflect.Type) string {
 }
 
 func rustType(t reflect.Type) string {
-	// Handle special cases first
 	switch t {
 	case reflect.TypeOf(cid.Cid{}):
 		return "Cid"
+	case reflect.TypeOf(types.TipSetKey{}):
+		return "TipSetKey"
 	case reflect.TypeOf([]byte{}):
 		return "Vec<u8>"
 	case reflect.TypeOf(abi.Randomness{}):
@@ -153,8 +158,6 @@ func rustType(t reflect.Type) string {
 		return "String"
 	case reflect.TypeOf(address.Address{}):
 		return "String"
-	case reflect.TypeOf(types.TipSetKey{}):
-		return "Vec<Cid>"
 	}
 
 	// Handle channels (for subscriptions)
@@ -230,26 +233,228 @@ func rustType(t reflect.Type) string {
 	return "Value"
 }
 
-func processMethod(m reflect.Method) MethodInfo {
-	method := MethodInfo{
-		Name:           m.Name,
-		IsSubscription: false,
-		Params:         make([]ParamInfo, 0),
-		Returns:        make([]ReturnInfo, 0),
+// Define types that can be optional
+var optionalTypes = map[reflect.Type]bool{
+	reflect.TypeOf(types.TipSetKey{}):      true,
+	reflect.TypeOf([]types.TipSetKey{}):    true,
+	reflect.TypeOf(types.MessageReceipt{}): true,
+	reflect.TypeOf(types.Message{}):        true,
+	reflect.TypeOf(types.SignedMessage{}):  true,
+	reflect.TypeOf(types.BlockHeader{}):    true,
+	reflect.TypeOf(types.TipSet{}):         true,
+	// Add other known optional types
+}
+
+// Define method parameters that should be optional
+var optionalParams = map[string]map[string]bool{
+	"StateListMiners": {
+		"tipset": true,
+	},
+	"StateMinerPower": {
+		"tipset": true,
+	},
+	"StateGetActor": {
+		"tipset": true,
+	},
+	"StateReadState": {
+		"tipset": true,
+	},
+	"StateGetReceipt": {
+		"tipset": true,
+	},
+	"StateSearchMsg": {
+		"tipset": true,
+	},
+	"StateWaitMsg": {
+		"confidence": true,
+	},
+	// Add other known method-specific optional parameters
+}
+
+func isOptionalParameter(methodName string, paramName string, paramType reflect.Type) bool {
+	// Check if type is known optional
+	if optionalTypes[paramType] {
+		return true
 	}
 
+	// Check method-specific optional parameters
+	if methodParams, ok := optionalParams[methodName]; ok {
+		if methodParams[paramName] {
+			return true
+		}
+	}
+
+	// Check if it's a pointer type (Go convention for optional params)
+	if paramType.Kind() == reflect.Ptr {
+		return true
+	}
+
+	return false
+}
+
+type APIDocInfo struct {
+	methodDocs map[string]string
+	paramDocs  map[string]map[string]string
+	// Add a new field to track optional parameters
+	optionalParams map[string]map[string]bool
+}
+
+func parseParamDocs(docText string) map[string]string {
+	paramDocs := make(map[string]string)
+
+	// Split doc text into lines
+	lines := strings.Split(docText, "\n")
+
+	// Track current parameter being documented
+	var currentParam string
+	var currentDoc strings.Builder
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Look for parameter documentation patterns
+		// Common formats in Lotus API:
+		// param_name: description
+		// param_name - description
+		if matches := regexp.MustCompile(`^(\w+)[\s]*[-:]\s*(.+)`).FindStringSubmatch(line); len(matches) > 0 {
+			// If we were tracking a previous parameter, save it
+			if currentParam != "" {
+				paramDocs[currentParam] = strings.TrimSpace(currentDoc.String())
+				currentDoc.Reset()
+			}
+
+			currentParam = matches[1]
+			currentDoc.WriteString(matches[2])
+		} else if currentParam != "" && line != "" {
+			// Continue documentation for current parameter
+			currentDoc.WriteString(" ")
+			currentDoc.WriteString(line)
+		}
+	}
+
+	// Save the last parameter if any
+	if currentParam != "" {
+		paramDocs[currentParam] = strings.TrimSpace(currentDoc.String())
+	}
+
+	return paramDocs
+}
+
+func parseAPIDoc() (*APIDocInfo, error) {
+	fset := token.NewFileSet()
+
+	apiPath, err := findLotusAPIPath()
+	if err != nil {
+		return nil, fmt.Errorf("could not find Lotus API source: %v", err)
+	}
+
+	packages, err := parser.ParseDir(fset, apiPath, nil, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse API source: %v", err)
+	}
+
+	docInfo := &APIDocInfo{
+		methodDocs:     make(map[string]string),
+		paramDocs:      make(map[string]map[string]string),
+		optionalParams: make(map[string]map[string]bool),
+	}
+
+	for _, pkg := range packages {
+		for _, file := range pkg.Files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				if i, ok := n.(*ast.InterfaceType); ok {
+					for _, method := range i.Methods.List {
+						if method.Doc != nil {
+							methodName := method.Names[0].Name
+							docInfo.methodDocs[methodName] = method.Doc.Text()
+							docInfo.paramDocs[methodName] = parseParamDocs(method.Doc.Text())
+							docInfo.optionalParams[methodName] = parseOptionalParams(method.Doc.Text())
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	return docInfo, nil
+}
+
+func parseOptionalParams(docText string) map[string]bool {
+	optionals := make(map[string]bool)
+
+	// Split doc text into lines
+	lines := strings.Split(docText, "\n")
+
+	// Look for parameter documentation
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Look for optional parameter indicators
+		// Common patterns in Lotus API docs:
+		// - "optional: param_name"
+		// - "param_name (optional)"
+		// - "[optional] param_name"
+		if strings.Contains(strings.ToLower(line), "optional") {
+			// Extract parameter name using regex
+			re := regexp.MustCompile(`(?i)(optional:\s*)?(\w+)|\[optional\]\s*(\w+)|(\w+)\s*\(optional\)`)
+			if matches := re.FindStringSubmatch(line); len(matches) > 0 {
+				// Find the non-empty group that contains the parameter name
+				for _, match := range matches[1:] {
+					if match != "" && match != "optional:" {
+						optionals[match] = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return optionals
+}
+
+func processMethod(m reflect.Method, docInfo *APIDocInfo) MethodInfo {
 	methodType := m.Type
+	params := make([]ParamInfo, 0)
+	returns := make([]ReturnInfo, 0)
+	isSubscription := false
 	usedNames := make(map[string]bool)
 
-	// Skip receiver and context parameter
+	// Get optional parameters for this method
+	methodOptionals := docInfo.optionalParams[m.Name]
+
+	// Process parameters, starting from 2 to skip receiver and context
 	for j := 2; j < methodType.NumIn(); j++ {
 		paramType := methodType.In(j)
-		baseName := getBaseParamName(paramType)
-		paramName := getUniqueParamName(baseName, usedNames)
+		if paramType.Kind() == reflect.Chan {
+			isSubscription = true
+			continue
+		}
 
-		method.Params = append(method.Params, ParamInfo{
+		paramName := getUniqueParamName(getBaseParamName(paramType), usedNames)
+		paramTypeStr := rustType(paramType)
+
+		// Check if parameter should be optional
+		isOptional := false
+
+		// Check if this parameter is marked as optional in the docs
+		if methodOptionals != nil && methodOptionals[paramName] {
+			isOptional = true
+		}
+
+		// Check if it's a known optional type
+		if optionalTypes[paramType] {
+			isOptional = true
+		}
+
+		// If parameter is optional, wrap it in Option
+		if isOptional {
+			paramTypeStr = fmt.Sprintf("Option<%s>", paramTypeStr)
+		}
+
+		params = append(params, ParamInfo{
 			Name: paramName,
-			Type: rustType(paramType),
+			Type: paramTypeStr,
 		})
 	}
 
@@ -257,18 +462,66 @@ func processMethod(m reflect.Method) MethodInfo {
 	for j := 0; j < methodType.NumOut(); j++ {
 		returnType := methodType.Out(j)
 		if returnType.String() != "error" {
-			method.Returns = append(method.Returns, ReturnInfo{
-				Type: rustType(returnType),
-			})
+			if returnType.Kind() == reflect.Chan {
+				isSubscription = true
+				returns = append(returns, ReturnInfo{
+					Type: rustType(returnType.Elem()),
+				})
+			} else {
+				returns = append(returns, ReturnInfo{
+					Type: rustType(returnType),
+				})
+			}
 		}
 	}
 
-	// Check if this is a subscription method
-	if methodType.NumOut() >= 2 && methodType.Out(0).Kind() == reflect.Chan {
-		method.IsSubscription = true
+	return MethodInfo{
+		Name:           m.Name,
+		IsSubscription: isSubscription,
+		Params:         params,
+		Returns:        returns,
+	}
+}
+
+func findLotusAPIPath() (string, error) {
+	// Try LOTUS_PATH first
+	if path := os.Getenv("LOTUS_PATH"); path != "" {
+		if _, err := os.Stat(filepath.Join(path, "api")); err == nil {
+			return filepath.Join(path, "api"), nil
+		}
 	}
 
-	return method
+	// Try GOPATH
+	if gopath := os.Getenv("GOPATH"); gopath != "" {
+		path := filepath.Join(gopath, "src/github.com/filecoin-project/lotus/api")
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	// Try Go module cache
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+	}
+
+	modPath := filepath.Join(gopath, "pkg/mod/github.com/filecoin-project/lotus@*")
+	matches, err := filepath.Glob(modPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to glob lotus module path: %v", err)
+	}
+
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no lotus module found in %s", modPath)
+	}
+
+	// Use the first match (usually there's only one, or we want the latest)
+	apiPath := filepath.Join(matches[0], "api")
+	if _, err := os.Stat(apiPath); err != nil {
+		return "", fmt.Errorf("api directory not found in %s: %v", matches[0], err)
+	}
+
+	return apiPath, nil
 }
 
 func (tr *TypeRegistry) RegisterType(t reflect.Type) {
@@ -457,6 +710,19 @@ pub struct %s {
 }`, t.Name(), strings.Join(fields, "\n"))
 }
 
+func generateCommonTypes() string {
+	return `#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cid {
+    #[serde(rename = "/")]
+    pub str: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TipSetKey {
+    pub cids: Vec<Cid>,
+}`
+}
+
 func main() {
 	var t reflect.Type
 	var apiName string
@@ -493,15 +759,32 @@ func main() {
 	fmt.Fprintf(os.Stderr, "=== Analyzing API Type ===\n")
 	debugPrintType(t, 0)
 
+	fmt.Println(generateCommonTypes())
+	fmt.Println()
+
 	registry := NewTypeRegistry()
+	// Mark common types as seen to prevent regeneration
+	registry.seen[reflect.TypeOf(cid.Cid{})] = true
+	registry.seen[reflect.TypeOf(types.TipSetKey{})] = true
+
 	methods := make([]MethodInfo, 0)
+
+	docInfo, err := parseAPIDoc()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not parse API docs: %v\n", err)
+		docInfo = &APIDocInfo{
+			methodDocs:     make(map[string]string),
+			paramDocs:      make(map[string]map[string]string),
+			optionalParams: make(map[string]map[string]bool),
+		}
+	}
 
 	fmt.Fprintf(os.Stderr, "\n=== Analyzing Methods ===\n")
 	for i := 0; i < t.NumMethod(); i++ {
 		m := t.Method(i)
 		fmt.Fprintf(os.Stderr, "Method: %s\n", m.Name)
 
-		method := processMethod(m)
+		method := processMethod(m, docInfo)
 		methods = append(methods, method)
 
 		// Register parameter and return types
@@ -539,13 +822,17 @@ func main() {
 		for _, param := range method.Params {
 			fmt.Printf(", %s: %s", param.Name, param.Type)
 		}
-		fmt.Printf(") -> Result<")
-		if len(method.Returns) > 0 {
-			fmt.Printf("%s", method.Returns[0].Type)
+		if method.IsSubscription {
+			fmt.Printf(") -> Result<mpsc::Receiver<%s>, Error>;\n", method.Returns[0].Type)
 		} else {
-			fmt.Printf("()")
+			fmt.Printf(") -> Result<")
+			if len(method.Returns) > 0 {
+				fmt.Printf("%s", method.Returns[0].Type)
+			} else {
+				fmt.Printf("()")
+			}
+			fmt.Printf(", Error>;\n")
 		}
-		fmt.Printf(", Error>;\n")
 	}
 	fmt.Println("}")
 	fmt.Println()
@@ -571,13 +858,17 @@ impl %sApi for %sClient {
 		for _, param := range method.Params {
 			fmt.Printf(", %s: %s", param.Name, param.Type)
 		}
-		fmt.Printf(") -> Result<")
-		if len(method.Returns) > 0 {
-			fmt.Printf("%s", method.Returns[0].Type)
+		if method.IsSubscription {
+			fmt.Printf(") -> Result<mpsc::Receiver<%s>, Error> {\n", method.Returns[0].Type)
 		} else {
-			fmt.Printf("()")
+			fmt.Printf(") -> Result<")
+			if len(method.Returns) > 0 {
+				fmt.Printf("%s", method.Returns[0].Type)
+			} else {
+				fmt.Printf("()")
+			}
+			fmt.Printf(", Error> {\n")
 		}
-		fmt.Printf(", Error> {\n")
 
 		if len(method.Params) > 0 {
 			fmt.Println("        let params = vec![")

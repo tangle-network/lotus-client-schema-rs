@@ -52,11 +52,7 @@ impl LotusClient {
         method: &str,
         params: Vec<Value>,
     ) -> Result<T, jsonrpc_core::Error> {
-        let params = if params.is_empty() {
-            ArrayParams::new()
-        } else {
-            rpc_params!(params)
-        };
+        let params = self.params(params)?;
         self.client
             .request(method, params)
             .await
@@ -69,11 +65,7 @@ impl LotusClient {
         method: &str,
         params: Vec<Value>,
     ) -> Result<mpsc::Receiver<T>, jsonrpc_core::Error> {
-        let params = if params.is_empty() {
-            ArrayParams::new()
-        } else {
-            rpc_params!(params)
-        };
+        let params = self.params(params)?;
         let (tx, rx) = mpsc::channel(100);
 
         let mut subscription = self
@@ -93,6 +85,24 @@ impl LotusClient {
         });
 
         Ok(rx)
+    }
+
+    /// Generate params for a JSON-RPC request
+    pub fn params(&self, params: Vec<Value>) -> Result<ArrayParams, jsonrpc_core::Error> {
+        if params.is_empty() {
+            Ok(ArrayParams::new())
+        } else {
+            // Convert params into individual array elements
+            let mut array_params = ArrayParams::new();
+            for param in params {
+                array_params.insert(param).map_err(|e| jsonrpc_core::Error {
+                    code: ErrorCode::InvalidParams,
+                    message: e.to_string(),
+                    data: None,
+                })?;
+            }
+            Ok(array_params)
+        }
     }
 
     /// Converts a jsonrpsee ClientError into a jsonrpc_core Error
