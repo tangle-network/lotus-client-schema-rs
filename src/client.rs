@@ -3,7 +3,6 @@ use jsonrpc_core::ErrorCode;
 use jsonrpsee::{
     core::client::ClientT,
     http_client::{HeaderMap, HttpClient, HttpClientBuilder},
-    rpc_params,
 };
 use jsonrpsee_core::{client::SubscriptionClientT, params::ArrayParams};
 use serde_json::Value;
@@ -95,11 +94,13 @@ impl LotusClient {
             // Convert params into individual array elements
             let mut array_params = ArrayParams::new();
             for param in params {
-                array_params.insert(param).map_err(|e| jsonrpc_core::Error {
-                    code: ErrorCode::InvalidParams,
-                    message: e.to_string(),
-                    data: None,
-                })?;
+                array_params
+                    .insert(param)
+                    .map_err(|e| jsonrpc_core::Error {
+                        code: ErrorCode::InvalidParams,
+                        message: e.to_string(),
+                        data: None,
+                    })?;
             }
             Ok(array_params)
         }

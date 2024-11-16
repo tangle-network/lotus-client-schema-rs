@@ -245,53 +245,6 @@ var optionalTypes = map[reflect.Type]bool{
 	// Add other known optional types
 }
 
-// Define method parameters that should be optional
-var optionalParams = map[string]map[string]bool{
-	"StateListMiners": {
-		"tipset": true,
-	},
-	"StateMinerPower": {
-		"tipset": true,
-	},
-	"StateGetActor": {
-		"tipset": true,
-	},
-	"StateReadState": {
-		"tipset": true,
-	},
-	"StateGetReceipt": {
-		"tipset": true,
-	},
-	"StateSearchMsg": {
-		"tipset": true,
-	},
-	"StateWaitMsg": {
-		"confidence": true,
-	},
-	// Add other known method-specific optional parameters
-}
-
-func isOptionalParameter(methodName string, paramName string, paramType reflect.Type) bool {
-	// Check if type is known optional
-	if optionalTypes[paramType] {
-		return true
-	}
-
-	// Check method-specific optional parameters
-	if methodParams, ok := optionalParams[methodName]; ok {
-		if methodParams[paramName] {
-			return true
-		}
-	}
-
-	// Check if it's a pointer type (Go convention for optional params)
-	if paramType.Kind() == reflect.Ptr {
-		return true
-	}
-
-	return false
-}
-
 type APIDocInfo struct {
 	methodDocs map[string]string
 	paramDocs  map[string]map[string]string
@@ -665,64 +618,6 @@ func toRustFieldName(name string) string {
 	return snakeCase
 }
 
-func generateStructDefinition(t reflect.Type) string {
-	var fields []string
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		fieldName := field.Name
-
-		// Get rust-safe field name
-		rustFieldName := toRustFieldName(fieldName)
-
-		fieldType := rustType(field.Type)
-		jsonTag := field.Tag.Get("json")
-		if jsonTag != "" {
-			name := strings.Split(jsonTag, ",")[0]
-			// If the JSON name is different from our rust field name, add rename attribute
-			if name != rustFieldName {
-				fields = append(fields, fmt.Sprintf("    #[serde(rename = \"%s\")]\n    pub %s: %s,",
-					name,
-					rustFieldName,
-					fieldType))
-			} else {
-				fields = append(fields, fmt.Sprintf("    pub %s: %s,",
-					rustFieldName,
-					fieldType))
-			}
-		} else {
-			// If no JSON tag, use the original field name as the rename target
-			if rustFieldName != toSnakeCase(fieldName) {
-				fields = append(fields, fmt.Sprintf("    #[serde(rename = \"%s\")]\n    pub %s: %s,",
-					toSnakeCase(fieldName),
-					rustFieldName,
-					fieldType))
-			} else {
-				fields = append(fields, fmt.Sprintf("    pub %s: %s,",
-					rustFieldName,
-					fieldType))
-			}
-		}
-	}
-
-	return fmt.Sprintf(`#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct %s {
-%s
-}`, t.Name(), strings.Join(fields, "\n"))
-}
-
-func generateCommonTypes() string {
-	return `#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Cid {
-    #[serde(rename = "/")]
-    pub str: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TipSetKey {
-    pub cids: Vec<Cid>,
-}`
-}
-
 func main() {
 	var t reflect.Type
 	var apiName string
@@ -759,11 +654,8 @@ func main() {
 	fmt.Fprintf(os.Stderr, "=== Analyzing API Type ===\n")
 	debugPrintType(t, 0)
 
-	fmt.Println(generateCommonTypes())
-	fmt.Println()
-
 	registry := NewTypeRegistry()
-	// Mark common types as seen to prevent regeneration
+	// Mark common types as seen to prevent regeneration since they're in types.rs
 	registry.seen[reflect.TypeOf(cid.Cid{})] = true
 	registry.seen[reflect.TypeOf(types.TipSetKey{})] = true
 
@@ -807,6 +699,7 @@ func main() {
 	fmt.Println("use std::collections::HashMap;")
 	fmt.Println("use uuid::Uuid;")
 	fmt.Println("use crate::client::LotusClient;")
+	fmt.Println("use crate::gen::types::{Cid, TipSetKey};")
 	fmt.Println()
 
 	// Output type definitions

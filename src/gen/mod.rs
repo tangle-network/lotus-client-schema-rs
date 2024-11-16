@@ -2,7 +2,8 @@
 #![allow(unused, clippy::too_many_arguments)]
 pub mod common;
 pub mod fullnode;
-pub mod storageminer;
 pub mod gateway;
+pub mod storageminer;
+pub mod types;
 pub mod wallet;
 pub mod worker;
